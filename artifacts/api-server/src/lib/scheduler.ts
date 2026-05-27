@@ -79,10 +79,8 @@ async function runScrapeJob() {
 }
 
 export function startScheduler() {
-  // Every 15 minutes, Monday–Sunday, 6:00am–6:45pm (last run 18:45)
-  // To also catch 7:00pm on the dot, hour range is extended to 19 with minute 0 only via the expression below
-  // Expression: at minutes 0,15,30,45 of hours 6 through 18 — runs 6:00 → 18:45
-  const schedule = "0,15,30,45 6-18 * * *";
+  // Every 10 minutes, 6:00am–6:50pm (last run 18:50)
+  const schedule = "*/10 6-18 * * *";
 
   cron.schedule(schedule, () => {
     void runScrapeJob();
@@ -90,6 +88,6 @@ export function startScheduler() {
 
   logger.info(
     { schedule },
-    "OfficerND scrape scheduler started — runs every 15 min, 6am–6:45pm"
+    "OfficerND scrape scheduler started — runs every 10 min, 6am–6:50pm"
   );
 }

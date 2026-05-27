@@ -109,4 +109,59 @@ router.post("/scrape", async (req, res) => {
   }
 });
 
+router.post("/scrape/test", async (req, res) => {
+  req.log.info("Starting dry-run OfficerND ticket scrape");
+
+  try {
+    const issues = await scrapeTickets();
+
+    if (issues.length === 0) {
+      res.json({
+        success: true,
+        dry_run: true,
+        message: "Scrape completed but no issues found. The page structure may need selector updates.",
+        would_insert: 0,
+        issues: [],
+      });
+      return;
+    }
+
+    const ticketNumbers = issues.map((i) => i.ticket).filter(Boolean);
+
+    const { data: existingRows, error: fetchError } = await supabase
+      .from("tasks")
+      .select("ticket")
+      .in("ticket", ticketNumbers);
+
+    if (fetchError) {
+      req.log.error({ error: fetchError }, "Dry-run: failed to fetch existing tasks");
+      res.status(500).json({ success: false, error: fetchError.message });
+      return;
+    }
+
+    const existingSet = new Set(
+      (existingRows ?? []).map((r: { ticket: string }) => String(r.ticket))
+    );
+
+    const newIssues = issues.filter(
+      (i) => i.ticket && !existingSet.has(String(i.ticket))
+    );
+
+    res.json({
+      success: true,
+      dry_run: true,
+      message: "Nothing was written. This is a preview of what would be inserted.",
+      total_scraped: issues.length,
+      would_insert: newIssues.length,
+      would_skip: issues.length - newIssues.length,
+      new_issues: newIssues,
+      existing_ticket_numbers: Array.from(existingSet),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    req.log.error({ err: message }, "Dry-run scrape failed");
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
 export default router;
