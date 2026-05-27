@@ -37,32 +37,57 @@ export async function scrapeTickets(): Promise<ScrapedIssue[]> {
   const page = await context.newPage();
 
   try {
-    // Navigate directly to the org-specific signin page (avoids two-step SSO routing)
-    const orgSigninUrl = `https://app.officernd.com/kiln/signin?email=${encodeURIComponent(email)}`;
-    logger.info({ url: orgSigninUrl }, "Navigating to org-specific signin");
-    await page.goto(orgSigninUrl, { waitUntil: "networkidle", timeout: 30000 });
-    logger.info({ url: page.url() }, "Arrived at signin page");
+    logger.info("Navigating to OfficerND login");
+    await page.goto("https://app.officernd.com/login", {
+      waitUntil: "networkidle",
+      timeout: 30000,
+    });
 
-    // Fill email if the field is present and empty
-    const emailField = page.locator('input[name="email"], input[type="email"], input[type="username"]').first();
-    if (await emailField.isVisible().catch(() => false)) {
-      await emailField.fill(email);
-    }
+    // Step 1: fill email field (has type="username" not type="email")
+    await page.fill('input[name="email"]', email);
+    logger.info("Filled email");
 
-    // Fill password
-    const passwordField = page.locator('input[type="password"], input[name="password"]').first();
-    await passwordField.waitFor({ state: "visible", timeout: 15000 });
-    await passwordField.fill(password);
-    logger.info("Filled credentials on org signin page");
+    // Step 2: click Continue — triggers AJAX to reveal auth options
+    await page.click('.continue-sso-button, button:has-text("Continue")');
+    logger.info("Clicked Continue, waiting for auth options to appear");
 
-    // Submit
-    await page.click('button[type="submit"], input[type="submit"], button:has-text("Sign"), button:has-text("Log in")');
+    // Step 3: wait for #login-next-step to become visible (AJAX can take a few seconds)
+    await page.waitForSelector('#login-next-step', { state: "visible", timeout: 15000 });
+
+    // Capture the next-step HTML to help debug what options are shown
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nextStepHtml: string = await page.evaluate(
+      // @ts-ignore — runs in browser context
+      () => document.querySelector('#login-next-step')?.innerHTML?.slice(0, 4000) ?? ""
+    );
+    logger.info({ nextStepHtml }, "login-next-step HTML");
+
+    // Step 4: click "Sign in with password" — the non-SSO option
+    const passwordSigninLink = page.locator(
+      '#login-next-step a:has-text("password"), #login-next-step button:has-text("password"), ' +
+      '#login-next-step [class*="password"], #login-next-step a:has-text("Password")'
+    ).first();
+    await passwordSigninLink.waitFor({ state: "visible", timeout: 10000 });
+    await passwordSigninLink.click();
+    logger.info("Clicked sign in with password");
+
+    // Step 5: wait for the password input to be visible
+    const passwordInput = page.locator('#login-next-step input[type="password"], input[name="password"]').first();
+    await passwordInput.waitFor({ state: "visible", timeout: 10000 });
+    await passwordInput.fill(password);
+    logger.info("Filled password");
+
+    // Step 6: submit
+    await page.click(
+      '#login-next-step button[type="submit"], #login-next-step .signin-password-button, ' +
+      '#login-next-step button:has-text("Sign in"), #login-next-step button:has-text("Log in")'
+    );
     await page.waitForTimeout(3000);
-    logger.info({ url: page.url() }, "After signin submit");
+    logger.info({ url: page.url() }, "After password submit");
 
-    // Wait until the browser leaves the signin page
+    // Step 7: wait until the page navigates away from login
     await page.waitForURL(
-      (url: URL) => !url.pathname.includes("/signin") && !url.pathname.includes("/login"),
+      (url: URL) => !url.pathname.includes("/login"),
       { timeout: 30000 }
     );
 
