@@ -8,83 +8,105 @@ router.post("/scrape", async (req, res) => {
   req.log.info("Starting OfficerND ticket scrape");
 
   try {
-    const tickets = await scrapeTickets();
+    const issues = await scrapeTickets();
 
-    if (tickets.length === 0) {
+    if (issues.length === 0) {
       res.json({
         success: true,
-        message: "Scrape completed but no tickets found. The page structure may have changed.",
+        message: "Scrape completed but no issues found. The page structure may need selector updates.",
         inserted: 0,
-        tickets: [],
+        issues: [],
       });
       return;
     }
 
-    const rows = tickets.map((t) => ({
-      id: t.id,
-      title: t.title,
-      status: t.status,
-      assignee: t.assignee,
-      priority: t.priority,
-      type: t.type,
-      reporter: t.reporter,
-      description: t.description,
-      created_at: t.created_at,
-      updated_at: t.updated_at,
-      raw: t.raw,
-      scraped_at: new Date().toISOString(),
+    // Fetch existing ticket numbers from tasks table to avoid duplicates
+    const existingTicketNumbers = issues
+      .map((i) => i.ticket)
+      .filter(Boolean);
+
+    const { data: existingRows, error: fetchError } = await supabase
+      .from("tasks")
+      .select("ticket")
+      .in("ticket", existingTicketNumbers);
+
+    if (fetchError) {
+      req.log.error({ error: fetchError }, "Failed to fetch existing tasks");
+      res.status(500).json({ success: false, error: fetchError.message });
+      return;
+    }
+
+    const existingSet = new Set(
+      (existingRows ?? []).map((r: { ticket: string }) => String(r.ticket))
+    );
+
+    // Only insert issues not already in the table
+    const newIssues = issues.filter(
+      (i) => i.ticket && !existingSet.has(String(i.ticket))
+    );
+
+    req.log.info(
+      { total: issues.length, new: newIssues.length, existing: existingSet.size },
+      "Deduplication complete"
+    );
+
+    if (newIssues.length === 0) {
+      res.json({
+        success: true,
+        message: "All scraped issues already exist in the tasks table.",
+        inserted: 0,
+        skipped: issues.length,
+        issues,
+      });
+      return;
+    }
+
+    // Map to tasks table schema — id is omitted, Supabase auto-generates it
+    const rows = newIssues.map((issue) => ({
+      title: issue.title,
+      description: issue.description ?? null,
+      ticket: issue.ticket || null,
+      link: issue.link ?? null,
+      completed: false,
+      completed_at: null,
+      email_added: false,
+      email_category: null,
+      email_report: null,
+      completion_notes: null,
+      priority: "normal",
+      building: "Kiln",
+      scheduled_day: null,
+      rollover_count: 0,
+      recurring: false,
+      recurring_type: null,
+      archived: false,
     }));
 
     const { data, error } = await supabase
-      .from("tickets")
-      .upsert(rows, { onConflict: "id", ignoreDuplicates: false })
+      .from("tasks")
+      .insert(rows)
       .select();
 
     if (error) {
-      req.log.error({ error }, "Supabase upsert failed");
-      res.status(500).json({
-        success: false,
-        error: error.message,
-        hint: "Make sure the 'tickets' table exists in Supabase. See /api/scrape/schema for the required SQL.",
-      });
+      req.log.error({ error }, "Supabase insert failed");
+      res.status(500).json({ success: false, error: error.message });
       return;
     }
 
-    req.log.info({ count: data?.length }, "Tickets upserted to Supabase");
+    req.log.info({ count: data?.length }, "Tasks inserted to Supabase");
 
     res.json({
       success: true,
       inserted: data?.length ?? 0,
-      total_scraped: tickets.length,
-      tickets,
+      skipped: issues.length - newIssues.length,
+      total_scraped: issues.length,
+      tasks: data,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     req.log.error({ err: message }, "Scrape failed");
     res.status(500).json({ success: false, error: message });
   }
-});
-
-router.get("/scrape/schema", (_req, res) => {
-  res.json({
-    description: "Run this SQL in your Supabase SQL editor to create the required table",
-    sql: `
-CREATE TABLE IF NOT EXISTS tickets (
-  id TEXT PRIMARY KEY,
-  title TEXT,
-  status TEXT,
-  assignee TEXT,
-  priority TEXT,
-  type TEXT,
-  reporter TEXT,
-  description TEXT,
-  created_at TIMESTAMPTZ,
-  updated_at TIMESTAMPTZ,
-  scraped_at TIMESTAMPTZ DEFAULT NOW(),
-  raw JSONB
-);
-    `.trim(),
-  });
 });
 
 export default router;

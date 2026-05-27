@@ -1,24 +1,18 @@
 import { chromium } from "playwright";
 import { logger } from "./logger";
 
-export interface Ticket {
-  id: string;
+export interface ScrapedIssue {
   title: string;
-  status: string;
-  assignee: string | null;
-  created_at: string | null;
-  updated_at: string | null;
+  ticket: string;
+  link: string | null;
   description: string | null;
-  priority: string | null;
-  type: string | null;
-  reporter: string | null;
-  raw: Record<string, unknown>;
 }
 
+const OFFICERND_BASE = "https://app.officernd.com";
 const OFFICERND_URL =
   "https://app.officernd.com/admin/kiln/collaboration/issues?status=open&status=new&assignedTo=null&assignedTo=69eb87d26739c665abc204d3&key=dashboard";
 
-export async function scrapeTickets(): Promise<Ticket[]> {
+export async function scrapeTickets(): Promise<ScrapedIssue[]> {
   const email = process.env.OFFICERND_EMAIL;
   const password = process.env.OFFICERND_PASSWORD;
 
@@ -66,12 +60,12 @@ export async function scrapeTickets(): Promise<Ticket[]> {
       timeout: 30000,
     });
 
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
 
     logger.info("Extracting ticket data from page");
 
-    const tickets = await extractTicketsFromPage(page);
-    let allTickets = [...tickets];
+    const issues = await extractIssuesFromPage(page, OFFICERND_BASE);
+    let allIssues = [...issues];
     let hasNextPage = true;
     let pageNum = 1;
 
@@ -80,156 +74,98 @@ export async function scrapeTickets(): Promise<Ticket[]> {
         'button[aria-label="Next page"], button:has-text("Next"), [data-testid="next-page"], .pagination-next:not([disabled])'
       );
       const isVisible = await nextBtn.isVisible().catch(() => false);
-      if (!isVisible) {
-        hasNextPage = false;
-        break;
-      }
+      if (!isVisible) { hasNextPage = false; break; }
       const isDisabled = await nextBtn.isDisabled().catch(() => true);
-      if (isDisabled) {
-        hasNextPage = false;
-        break;
-      }
+      if (isDisabled) { hasNextPage = false; break; }
 
       pageNum++;
-      logger.info({ page: pageNum }, "Navigating to next page of tickets");
+      logger.info({ page: pageNum }, "Navigating to next page");
       await nextBtn.click();
       await page.waitForTimeout(2000);
-      const more = await extractTicketsFromPage(page);
-      allTickets = [...allTickets, ...more];
+      const more = await extractIssuesFromPage(page, OFFICERND_BASE);
+      allIssues = [...allIssues, ...more];
     }
 
-    logger.info({ count: allTickets.length }, "Scrape complete");
-    return allTickets;
+    logger.info({ count: allIssues.length }, "Scrape complete");
+    return allIssues;
   } finally {
     await browser.close();
   }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function extractTicketsFromPage(page: any): Promise<Ticket[]> {
-  // page.evaluate runs inside browser context — use any to avoid DOM type conflicts
+async function extractIssuesFromPage(page: any, baseUrl: string): Promise<ScrapedIssue[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw: any[] = await page.evaluate(() => {
-    /* global document */
+  const raw: any[] = await page.evaluate((base: string) => {
     // @ts-ignore
-    const tickets: unknown[] = [];
+    const issues: unknown[] = [];
 
+    // Try table rows first
     // @ts-ignore
-    const rows = document.querySelectorAll(
-      "tr[data-id], [data-issue-id], .issue-row, .ticket-row, tbody tr"
-    );
+    const rows = document.querySelectorAll("tbody tr, tr[data-id], [data-issue-id]");
 
     // @ts-ignore
     rows.forEach((row) => {
-      // @ts-ignore
-      const getText = (selector) =>
-        row.querySelector(selector)?.textContent?.trim() ?? null;
+      // Anchor tag that links to the issue
+      const anchor = row.querySelector("a[href*='issues/'], a[href*='issue/']");
+      const href = anchor?.getAttribute("href") ?? null;
+      const link = href ? (href.startsWith("http") ? href : base + href) : null;
 
-      const id =
-        row.getAttribute("data-id") ||
-        row.getAttribute("data-issue-id") ||
-        getText("[data-field='id'], .issue-id, .ticket-id, td:first-child") ||
-        "";
+      // Extract ticket number from the link or from a dedicated field
+      let ticket = "";
+      if (link) {
+        const match = link.match(/\/issues?\/([^/?#]+)/);
+        if (match) ticket = match[1];
+      }
+      if (!ticket) {
+        ticket =
+          row.getAttribute("data-id") ||
+          row.getAttribute("data-issue-id") ||
+          row.querySelector("[data-field='number'], [data-field='id'], .issue-number, .ticket-number")?.textContent?.trim() ||
+          "";
+      }
 
+      // Title: prefer the anchor text or a title field
       const title =
-        getText(
-          "[data-field='title'], .issue-title, .ticket-title, td:nth-child(2), .name"
-        ) ||
-        row.textContent?.trim().slice(0, 100) ||
+        anchor?.textContent?.trim() ||
+        row.querySelector("[data-field='title'], [data-field='name'], .issue-title, .title")?.textContent?.trim() ||
+        row.querySelector("td:nth-child(2), td:nth-child(1)")?.textContent?.trim() ||
         "";
 
-      const status =
-        getText(
-          "[data-field='status'], .status, .badge, .chip, [class*='status']"
-        ) || "";
+      const description =
+        row.querySelector("[data-field='description'], .description")?.textContent?.trim() || null;
 
-      const assignee = getText(
-        "[data-field='assignee'], .assignee, [class*='assignee']"
-      );
-      const priority = getText(
-        "[data-field='priority'], .priority, [class*='priority']"
-      );
-      const type = getText("[data-field='type'], .type, [class*='type']");
-      const reporter = getText(
-        "[data-field='reporter'], .reporter, [class*='reporter']"
-      );
+      if (!title && !ticket) return;
 
-      const createdAtEl = row.querySelector(
-        "[data-field='createdAt'], [data-field='created'], .created-at, [datetime]"
-      );
-      const createdAt =
-        createdAtEl?.getAttribute("datetime") ||
-        getText(
-          "[data-field='createdAt'], [data-field='created'], .created-at"
-        ) ||
-        null;
-
-      const updatedAtEl = row.querySelector(
-        "[data-field='updatedAt'], [data-field='updated'], .updated-at"
-      );
-      const updatedAt =
-        updatedAtEl?.getAttribute("datetime") ||
-        getText("[data-field='updatedAt'], [data-field='updated'], .updated-at") ||
-        null;
-
-      const description = getText(
-        "[data-field='description'], .description, .issue-body"
-      );
-
-      if (!id && !title) return;
-
-      tickets.push({
-        id: id || "unknown-" + Math.random(),
-        title,
-        status,
-        assignee,
-        priority,
-        type,
-        reporter,
-        created_at: createdAt,
-        updated_at: updatedAt,
-        description,
-        raw: { rowHtml: row.innerHTML?.slice(0, 2000) },
-      });
+      issues.push({ title, ticket, link, description });
     });
 
-    if (tickets.length === 0) {
+    // Fallback: card-based layout
+    if (issues.length === 0) {
       // @ts-ignore
-      const cards = document.querySelectorAll(
-        "[class*='issue'], [class*='ticket'], [class*='card']"
-      );
+      const cards = document.querySelectorAll("[class*='issue-item'], [class*='ticket-item'], [class*='issue-card'], [class*='ticket-card']");
       // @ts-ignore
       cards.forEach((card) => {
-        const id = card.getAttribute("data-id") || card.getAttribute("id") || "";
-        const title =
-          card
-            .querySelector("h1,h2,h3,h4,[class*='title']")
-            ?.textContent?.trim() || "";
-        const status =
-          card
-            .querySelector("[class*='status'],[class*='badge']")
-            ?.textContent?.trim() || "";
+        const anchor = card.querySelector("a[href*='issues/'], a[href*='issue/']");
+        const href = anchor?.getAttribute("href") ?? null;
+        const link = href ? (href.startsWith("http") ? href : base + href) : null;
 
-        if (title) {
-          tickets.push({
-            id: id || "card-" + Math.random(),
-            title,
-            status,
-            assignee: null,
-            priority: null,
-            type: null,
-            reporter: null,
-            created_at: null,
-            updated_at: null,
-            description: null,
-            raw: { cardHtml: card.innerHTML?.slice(0, 2000) },
-          });
+        let ticket = "";
+        if (link) {
+          const match = link.match(/\/issues?\/([^/?#]+)/);
+          if (match) ticket = match[1];
         }
+
+        const title =
+          card.querySelector("h1,h2,h3,h4,[class*='title']")?.textContent?.trim() || "";
+
+        if (!title && !ticket) return;
+        issues.push({ title, ticket, link, description: null });
       });
     }
 
-    return tickets;
-  });
+    return issues;
+  }, baseUrl);
 
-  return raw as Ticket[];
+  return raw as ScrapedIssue[];
 }
