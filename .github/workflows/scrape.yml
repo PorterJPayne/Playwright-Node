@@ -1,0 +1,42 @@
+name: Scrape OfficerND Tickets
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 13-01 * * *"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install Dependencies
+        run: pnpm install
+
+      - name: Install Playwright Browsers
+        run: pnpm --filter @workspace/api-server exec playwright install --with-deps chromium
+
+      - name: Run Scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          OFFICERND_EMAIL: ${{ secrets.OFFICERND_EMAIL }}
+          OFFICERND_PASSWORD: ${{ secrets.OFFICERND_PASSWORD }}
+          PORT: 3000
+        run: |
+          pnpm --filter @workspace/api-server run dev &
+          sleep 15
+          curl -X POST http://localhost:3000/api/scrape
