@@ -53,7 +53,7 @@ export async function scrapeTickets(): Promise<ScrapedIssue[]> {
     // Step 3: wait for the challenge form to appear (contains both SSO and password options)
     await page.waitForSelector('#challenge-form', { state: "visible", timeout: 15000 });
 
-    // Step 4: fill password directly into the password field (password option is already shown)
+    // Step 4: fill password directly into the password field
     await page.fill('#challenge-form input[name="password"]', password);
     logger.info("Filled password");
 
@@ -62,31 +62,19 @@ export async function scrapeTickets(): Promise<ScrapedIssue[]> {
     logger.info("Clicked Sign In submit button");
 
     // Step 6: wait until we land on the admin area — confirms actual auth success
-    // (not just client-side URL changes like /kiln/signin which happen immediately)
     await page.waitForURL(
       (url: URL) => url.pathname.includes("/admin/"),
       { timeout: 30000 }
     );
 
-    logger.info({ url: page.url() }, "Login successful, navigating to issues page");
+    logger.info({ url: page.url() }, "Login successful, navigating to issues list");
     await page.goto(OFFICERND_URL, {
       waitUntil: "networkidle",
       timeout: 30000,
     });
-
     await page.waitForTimeout(3000);
 
-    logger.info("Extracting ticket data from page");
-
-    // Debug: log page URL and a snippet of the HTML to help tune selectors
-    const currentUrl = page.url();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bodySnippet: string = await page.evaluate(
-      // @ts-ignore — runs in browser context
-      () => document.body?.innerHTML?.slice(0, 3000) ?? ""
-    );
-    logger.info({ url: currentUrl, bodySnippet }, "Page state before extraction");
-
+    logger.info("Extracting ticket list from issues page");
     const issues = await extractIssuesFromPage(page, OFFICERND_BASE);
     let allIssues = [...issues];
     let hasNextPage = true;
@@ -109,11 +97,68 @@ export async function scrapeTickets(): Promise<ScrapedIssue[]> {
       allIssues = [...allIssues, ...more];
     }
 
-    logger.info({ count: allIssues.length }, "Scrape complete");
+    logger.info({ count: allIssues.length }, "List scrape complete, visiting detail pages");
+
+    // Visit each issue's detail page to get the real title and description
+    let firstDetail = true;
+    for (const issue of allIssues) {
+      if (!issue.link) continue;
+      const detail = await scrapeIssueDetail(page, issue.link, firstDetail);
+      firstDetail = false;
+      if (detail.title) issue.title = detail.title;
+      issue.description = detail.description;
+    }
+
+    logger.info({ count: allIssues.length }, "Scrape complete with full detail");
     return allIssues;
   } finally {
     await browser.close();
   }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function scrapeIssueDetail(page: any, link: string, logHtml = false): Promise<{ title: string; description: string | null }> {
+  await page.goto(link, { waitUntil: "networkidle", timeout: 30000 });
+  await page.waitForTimeout(2000);
+
+  if (logHtml) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const html: string = await page.evaluate(
+      // @ts-ignore — runs in browser context
+      () => document.body?.innerHTML?.slice(4000, 12000) ?? ""
+    );
+    logger.info({ link, html }, "Issue detail page HTML — right column area");
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result: { title: string; description: string | null } = await page.evaluate(() => {
+    // @ts-ignore
+    const el = (sel: string) => document.querySelector(sel)?.textContent?.trim() || null;
+
+    // Title: OfficerND uses h4.rnd-title for the issue title
+    const title =
+      el('h4.rnd-title') ||
+      el('h4[class*="rnd-title"]') ||
+      el('h1') ||
+      el('[class*="issue-title"]') ||
+      el('.panel-title') ||
+      el('[data-field="title"]') ||
+      "";
+
+    // Description: look for the issue body / notes in the right column
+    const description =
+      el('.col-md-9 p') ||
+      el('[class*="description-text"]') ||
+      el('[class*="issue-description"]') ||
+      el('[class*="issue-body"]') ||
+      el('[data-field="description"]') ||
+      el('.description') ||
+      null;
+
+    return { title, description };
+  });
+
+  return result;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -129,36 +174,25 @@ async function extractIssuesFromPage(page: any, baseUrl: string): Promise<Scrape
 
     // @ts-ignore
     rows.forEach((row) => {
-      // Anchor tag that links to the issue
       const anchor = row.querySelector("a[href*='issues/'], a[href*='issue/']");
       const href = anchor?.getAttribute("href") ?? null;
       const link = href ? (href.startsWith("http") ? href : base + href) : null;
 
-      // Extract ticket number from the link or from a dedicated field
-      let ticket = "";
-      if (link) {
-        const match = link.match(/\/issues?\/([^/?#]+)/);
-        if (match) ticket = match[1];
-      }
-      if (!ticket) {
-        ticket =
-          row.getAttribute("data-id") ||
-          row.getAttribute("data-issue-id") ||
-          row.querySelector("[data-field='number'], [data-field='id'], .issue-number, .ticket-number")?.textContent?.trim() ||
-          "";
-      }
-
-      // Title: prefer the anchor text or a title field
-      const title =
+      // ticket = the human-readable display number (e.g. "#711867") from the anchor text
+      const ticket =
         anchor?.textContent?.trim() ||
-        row.querySelector("[data-field='title'], [data-field='name'], .issue-title, .title")?.textContent?.trim() ||
-        row.querySelector("td:nth-child(2), td:nth-child(1)")?.textContent?.trim() ||
+        row.querySelector("[data-field='number'], .issue-number, .ticket-number")?.textContent?.trim() ||
+        row.getAttribute("data-id") ||
+        row.getAttribute("data-issue-id") ||
         "";
+
+      // title starts empty — will be filled in by the detail page visit
+      const title = "";
 
       const description =
         row.querySelector("[data-field='description'], .description")?.textContent?.trim() || null;
 
-      if (!title && !ticket) return;
+      if (!ticket && !link) return;
 
       issues.push({ title, ticket, link, description });
     });
