@@ -186,6 +186,9 @@ async function extractIssuesFromPage(page: any, baseUrl: string): Promise<Scrape
         row.getAttribute("data-issue-id") ||
         "";
 
+      console.log('SCRAPED TICKETS:', ticket);
+console.log('TICKET COUNT:', ticket.length);
+
       // title starts empty — will be filled in by the detail page visit
       const title = "";
 
