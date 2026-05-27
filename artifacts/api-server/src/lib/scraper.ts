@@ -24,7 +24,12 @@ export async function scrapeTickets(): Promise<ScrapedIssue[]> {
 
   logger.info("Launching browser for OfficerND scrape");
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath:
+      process.env.CHROMIUM_PATH ||
+      "/nix/store/qa9cnw4v5xkxyip6mb9kxqfq1z4x2dx1-chromium-138.0.7204.100/bin/chromium",
+  });
   const context = await browser.newContext({
     userAgent:
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -32,29 +37,37 @@ export async function scrapeTickets(): Promise<ScrapedIssue[]> {
   const page = await context.newPage();
 
   try {
-    logger.info("Navigating to OfficerND login");
-    await page.goto("https://app.officernd.com/login", {
-      waitUntil: "networkidle",
-      timeout: 30000,
-    });
+    // Navigate directly to the org-specific signin page (avoids two-step SSO routing)
+    const orgSigninUrl = `https://app.officernd.com/kiln/signin?email=${encodeURIComponent(email)}`;
+    logger.info({ url: orgSigninUrl }, "Navigating to org-specific signin");
+    await page.goto(orgSigninUrl, { waitUntil: "networkidle", timeout: 30000 });
+    logger.info({ url: page.url() }, "Arrived at signin page");
 
-    await page.fill(
-      'input[type="email"], input[name="email"], input[placeholder*="email" i]',
-      email
+    // Fill email if the field is present and empty
+    const emailField = page.locator('input[name="email"], input[type="email"], input[type="username"]').first();
+    if (await emailField.isVisible().catch(() => false)) {
+      await emailField.fill(email);
+    }
+
+    // Fill password
+    const passwordField = page.locator('input[type="password"], input[name="password"]').first();
+    await passwordField.waitFor({ state: "visible", timeout: 15000 });
+    await passwordField.fill(password);
+    logger.info("Filled credentials on org signin page");
+
+    // Submit
+    await page.click('button[type="submit"], input[type="submit"], button:has-text("Sign"), button:has-text("Log in")');
+    await page.waitForTimeout(3000);
+    logger.info({ url: page.url() }, "After signin submit");
+
+    // Wait until the browser leaves the signin page
+    await page.waitForURL(
+      (url: URL) => !url.pathname.includes("/signin") && !url.pathname.includes("/login"),
+      { timeout: 30000 }
     );
-    await page.fill(
-      'input[type="password"], input[name="password"], input[placeholder*="password" i]',
-      password
-    );
 
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle", timeout: 30000 }),
-      page.click(
-        'button[type="submit"], button:has-text("Sign in"), button:has-text("Log in"), input[type="submit"]'
-      ),
-    ]);
-
-    logger.info("Logged in, navigating to issues page");
+    const postLoginUrl = page.url();
+    logger.info({ postLoginUrl }, "Post-login URL — navigating to issues page");
     await page.goto(OFFICERND_URL, {
       waitUntil: "networkidle",
       timeout: 30000,
@@ -63,6 +76,15 @@ export async function scrapeTickets(): Promise<ScrapedIssue[]> {
     await page.waitForTimeout(3000);
 
     logger.info("Extracting ticket data from page");
+
+    // Debug: log page URL and a snippet of the HTML to help tune selectors
+    const currentUrl = page.url();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bodySnippet: string = await page.evaluate(
+      // @ts-ignore — runs in browser context
+      () => document.body?.innerHTML?.slice(0, 3000) ?? ""
+    );
+    logger.info({ url: currentUrl, bodySnippet }, "Page state before extraction");
 
     const issues = await extractIssuesFromPage(page, OFFICERND_BASE);
     let allIssues = [...issues];
